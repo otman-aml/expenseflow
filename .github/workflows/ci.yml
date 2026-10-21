@@ -55,7 +55,7 @@ jobs:
       # d'image, où le démon est absent (cf. backend/Dockerfile).
       - name: Compiler et tester
         working-directory: ./backend
-        run: ./mvnw -B clean test
+        run: sh ./mvnw -B clean test
 
   # ------------------------------------------------------------
   # Frontend — lint et build de production
