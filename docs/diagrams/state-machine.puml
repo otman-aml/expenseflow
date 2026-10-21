@@ -1,0 +1,102 @@
+@startuml state-machine
+' ============================================================
+' ExpenseFlow — Diagramme de machine à états
+' Sources vérifiées :
+'   entity/enums/ExpenseStatus.java   — 8 valeurs EXACTES
+'   workflow/ExpenseWorkflow.java     — TRANSITIONS (EnumMap),
+'     canTransition (switch des rôles, l.151-157), TERMINAUX,
+'     assertTransition → WorkflowException (409), isTerminal
+'   service/ExpenseRequestService.java — les 5 méthodes de
+'     transition + les 2 sauts système (l.516 et l.567)
+' ============================================================
+
+title ExpenseFlow — Cycle de vie d'une note de frais\n(8 états · 2 transitions automatiques · 3 terminaux)
+
+skinparam state {
+  BackgroundColor White
+  BorderColor Black
+  FontSize 13
+}
+
+[*] --> DRAFT : création\nPOST /api/expense-requests\n(auteur = utilisateur du jeton)
+
+' ---------- Les 8 états (ExpenseStatus.java) ----------
+
+state DRAFT : Brouillon — modifiable par son auteur seul\n(total recalculé ; plafonds NON vérifiés ici)
+
+state SUBMITTED : État transitoire — franchi dans la MÊME\ntransaction que la soumission (jamais seul en base)
+
+state PENDING_MANAGER : En attente d'une décision de manager\n(file consultable via ?statut=PENDING_MANAGER)
+
+state APPROVED_MANAGER : Approuvé par le manager — transitoire :\nla finance prend le relais immédiatement
+
+state REJECTED_MANAGER #LightCoral : TERMINAL — rejeté par un manager\n(motif obligatoire, notification NOTE_REJETEE)
+
+state PENDING_FINANCE : En attente d'un remboursement finance\n(file ?statut=PENDING_FINANCE)
+
+state REIMBURSED #LightGreen : TERMINAL — remboursé, fin du circuit\n(NOTE_REMBOURSEE)
+
+state REJECTED_FINANCE #LightCoral : TERMINAL — rejeté par la finance\n(motif obligatoire, NOTE_REJETEE_FINANCE)
+
+' ---------- Transitions pilotées par l'API (5, via assertTransition) ----------
+
+DRAFT --> SUBMITTED : <b>submit</b> — POST /{id}/submit\nrègle : <b>auteur seul</b> (isOwner)\nplafonds d'abord → 409 si dépassé\nsinon 2 traces audit (DRAFT→SUBMITTED)
+
+PENDING_MANAGER --> APPROVED_MANAGER : <b>approve</b> — POST /{id}/approve\nrôle : <b>MANAGER ou FINANCE_ADMIN</b>\n+ entrée approvals (APPROVED_MANAGER)
+
+PENDING_MANAGER --> REJECTED_MANAGER : <b>reject</b> — POST /{id}/reject\nrôle : <b>MANAGER ou FINANCE_ADMIN</b>\nmotif obligatoire + approvals
+
+PENDING_FINANCE --> REIMBURSED : <b>reimburse</b> — POST /{id}/reimburse\nrôle : <b>FINANCE_ADMIN seul</b>\napprobation finance dans approvals
+
+PENDING_FINANCE --> REJECTED_FINANCE : <b>reject-finance</b> — POST /{id}/reject-finance\nrôle : <b>FINANCE_ADMIN seul</b>\nmotif obligatoire + approvals
+
+' ---------- Les 2 transitions AUTOMATIQUES (système, jamais d'API) ----------
+
+SUBMITTED -[#Blue,dashed]-> PENDING_MANAGER : <b>AUTOMATIQUE</b> — soumission\nmême transaction, sans assertTransition,\naudit SUBMITTED→PENDING_MANAGER,\nnotification à TOUS les managers
+
+APPROVED_MANAGER -[#Blue,dashed]-> PENDING_FINANCE : <b>AUTOMATIQUE</b> — relais finance\nmême transaction, sans assertTransition,\naudit APPROVED_MANAGER→PENDING_FINANCE,\nnote à l'auteur (NOTE_APPROUVEE)
+
+' ---------- États terminaux ----------
+
+REIMBURSED --> [*]
+REJECTED_MANAGER --> [*]
+REJECTED_FINANCE --> [*]
+
+' ---------- Notes de règles ( ExpenseWorkflow.java ) ----------
+
+note right of SUBMITTED
+  <b>Les 2 transitions bleues en pointillé sont
+  ABSENTES de la table TRANSITIONS</b> (javadoc l.74-78) :
+  les modéliser là laisserait croire qu'un MANAGER
+  peut les déclencher par un appel d'API. Seul le
+  service les franchit, dans sa propre transaction.
+end note
+
+note bottom of REIMBURSED
+  <b>TERMINAUX = {REIMBURSED, REJECTED_MANAGER,
+  REJECTED_FINANCE}</b> — clé absente de l'EnumMap :
+  canTransition() renvoie false AVANT même la table,
+  et isTerminal() expose le test. Sortie impossible.
+end note
+
+note left of DRAFT
+  <b>Table TRANSITIONS</b> (3 clés seulement) :
+  DRAFT → {SUBMITTED}
+  PENDING_MANAGER → {APPROVED_MANAGER, REJECTED_MANAGER}
+  PENDING_FINANCE → {REIMBURSED, REJECTED_FINANCE}
+  <b>switch des rôles (l.151-157)</b> :
+  SUBMITTED → isOwner · APPROVED/REJECTED_MANAGER →
+  MANAGER ou FINANCE_ADMIN · REIMBURSED/
+  REJECTED_FINANCE → FINANCE_ADMIN.
+end note
+
+note bottom of PENDING_FINANCE
+  <b>Refus → WorkflowException (409)</b> via
+  assertTransition — motif exploitable :
+  « transition inexistante » · « seul le proprietaire
+  peut soumettre sa note » · « droits insuffisants ».
+  Le SERVICE garde l'ordre 403 (rôle/propriété) avant
+  409 (état) : le code n'inverse jamais les deux.
+end note
+
+@enduml

@@ -1,0 +1,153 @@
+@startuml sequence-ai
+' ============================================================
+' ExpenseFlow — Diagramme de séquence : extraction IA (Groq)
+' Sources vérifiées (appels RÉELS, dans l'ordre exact) :
+'   frontend NoteForm.jsx   (preRemplirParIa : SEULE la 1re
+'                            ligne est remplacée, texte conservé)
+'   frontend api/ai.js      (POST /ai/extract-expense,
+'                            messageAdapté 502/503/504/422)
+'   AiController            (isAuthenticated, UserDetails)
+'   AiExtractionService     (findAll → prompt → appel →
+'                            analyser → valider → journaliser)
+'   service/LlmClient       (interface) + GroqClient (RestClient,
+'                            temperature 0.1, json_object,
+'                            traduire(code) → exceptions typées)
+'   AiCallLogService        (REQUIRES_NEW, try/catch interne)
+'   GlobalExceptionHandler  (422 / 502 / 503 / 504)
+' ============================================================
+
+title ExpenseFlow — Extraction IA\n(langage naturel → ligne pré-remplie · journal ai_call_log · erreurs typées)
+
+autonumber
+actor Utilisateur as U
+participant "NoteForm.jsx\n(preRemplirParIa)" as NF
+participant "api/ai.js\n(messageAdapté)" as API
+participant "AiController" as AC
+participant "AiExtractionService" as SVC
+participant "LlmClient (interface)\n→ GroqClient (RestClient)" as LLM
+participant "CategoryRepository" as CAT
+participant "AiCallLogService\n(REQUIRES_NEW)" as LOG
+database "PostgreSQL\ncategories + ai_call_log" as DB
+boundary "Groq API\n(externe, /chat/completions)" as GROQ
+
+== 1. Côté front : demande d'extraction ==
+
+U -> NF : tape « taxi 450 dh chez Acme le 14 mars »\nclic « Pré-remplir avec l'IA »
+NF -> NF : texteIa vide ? return\nsetExtractionEnCours(true)
+NF -> API : extractExpense(texteIa)
+API -> AC : POST /api/ai/extract-expense\nbody { texte }\nAuthorization: Bearer (isAuthenticated)
+
+== 2. Côté serveur : préparation du prompt ==
+
+AC -> SVC : extract(texte, userDetails.getUser())
+SVC -> CAT : findAll()
+CAT --> SVC : List<Category>
+alt aucune catégorie en base
+  SVC -->> AC : LlmExtractionException\n« Aucune categorie n'est configuree »
+  AC -> API : 422 (voir section E)
+else catégories présentes
+  SVC -> SVC : userId = currentUser.getId()\n(consumption attribuable)
+  SVC -> SVC : construirePrompt(texte, categories)\n— liste injectée DEPUIS LA BASE :\n« - id : nom » pour chaque catégorie\n— idParDefaut = « Autre » sinon 1re\n— aujourd'hui / hier calculés\n— consigne JSON seule + règles + 1 exemple\n— sans devise = dirham, pas de date future
+  SVC -> SVC : debut = System.nanoTime()
+
+  == 3. Appel HTTP au fournisseur ==
+
+  SVC -> LLM : chatCompletionAvecUsage(prompt)
+  LLM -> LLM : cleApi vide ?\n→ LlmConfigException (aucun appel réseau)
+  LLM -> GROQ : POST /chat/completions\nBearer + corps : model (llm.model),\nmessages, response_format json_object,\ntemperature 0.1
+
+  GROQ --> LLM : 200 { choices[0].message.content,\nusage : prompt/completion/total_tokens }
+  LLM -> LLM : extraireContenu(choices → content)\nchoices vide ou blank → LlmException\nlecture usage comme Number (Integer|Long)
+  LLM --> SVC : LlmResponse(content,\ntokensPrompt, tokensCompletion, tokensTotal)
+
+  == 4. Parsing de la réponse (analyser) ==
+
+  SVC -> SVC : fences ```json tolérées (strippées) —\nsinon LlmExtractionException « tronquee »
+  SVC -> SVC : extraction 1re { … dernière }\n(phrase de préambule tolérée)\nsinon « ne contient pas d'objet JSON »
+  SVC -> SVC : objectMapper.readValue → Map\néchec → « reponse illisible »
+
+  == 5. Validation des bornes (valider) — le LLM n'est PAS cru ==
+
+  SVC -> SVC : lireCategorie : null → exception\nparseLong + anyMatch en base\ninexistante → « Categorie inconnue : 99 »
+  SVC -> SVC : lireMontant : null → exception\n(jamais comblé par 0)\nscale 2, HALF_UP
+  SVC -> SVC : lireDate : null → LocalDate.now()\nparse échoué → « illisible »\ndate future → « dans le futur » (hallucination)
+  SVC -> SVC : lireDescription : null/vides → null\n> 500 → « trop longue » (même maxi que le form)
+  SVC -> SVC : new ExtractExpenseResponse(line)
+
+  == 6. Journalisation APRES validation ==
+
+  SVC -> LOG : journaliser(userId, debut, reponse, null)\ndureeMs = (nanoTime - debut)/1e6\nmodele = llmClient.modele() — jamais copié
+  LOG -> LOG : @Transactional(REQUIRES_NEW)\n+l'enveloppe try/catch interne
+  LOG -> DB : save ai_call_log\n(succes=true, tokens, duree, modele)
+  note over LOG : une réponse REFUSÉE par la validation n'est<br/>comptée ni comme réussite (taux honnête) ;<br/>REQUIRES_NEW : l'entrée survit au rollback métier
+
+  == 7. Réponse 200 et remplissage ==
+
+  SVC --> AC : ExtractExpenseResponse { ligne }
+  AC --> API : 200 OK
+  API --> NF : { ligne : categorieId, montant,\ndateDepense, description }
+  NF -> NF : setValue('lignes.0.categorieId'…) —<b>seule la 1re ligne</b> est remplacée\ntexteIa NON effacé (trace relisible)
+  NF --> U : ligne pré-remplie + « Ligne complétée.\nVérifiez-la avant d'enregistrer. »\n(l'utilisateur peut corriger avant save)
+
+end
+
+== E. Gestion des erreurs — une entrée de journal PAR ÉCHEC ==
+
+group Cas 1 — réponse du modèle refusée (422)
+  SVC -> SVC : LlmExtractionException (section 4 ou 5)
+  SVC -> LOG : journaliser(userId, debut, null, e)\nsucces=false, typeErreur=LlmExtractionException
+  LOG -> DB : save ai_call_log (échec mesuré)
+  SVC -->> AC : rethrow LlmExtractionException
+  AC -> API : 422 + message ACTIONNABLE\n(« Montant non determine », « Categorie\ninconnue : 99 ») affiché TEL QUEL
+  API --> NF : messageAdapté → messageBackend
+  NF --> U : ErrorBanner « Categorie inconnue : 99 »\nformulaire reste saisissable à la main
+end
+
+group Cas 2 — panne ou refus du fournisseur (502)
+  note over GROQ,LLM
+    GroqClient.traduire(code) :<b>401/403</b> → LlmAuthException ·
+    <b>429</b> → LlmRateLimitException ·<b>≥500</b> → LlmServerException ·
+    autre → LlmException — toutes héritent de LlmException
+  end note
+  GROQ --> LLM : 401 | 429 | 5xx
+  LLM -->> SVC : LlmException (famille)
+  SVC -> LOG : journaliser(..., typeErreur=nom court)
+  SVC -->> AC : rethrow
+  AC -> API : 502 via handler LlmException\n(message générique : aucun détail fuité)
+  API --> NF : « momentanement indisponible. Reessayez »
+end
+
+group Cas 3 — délai dépassé (504)
+  GROQ -->> LLM : ResourceAccessException\n(HttpTimeoutException enveloppée)
+  LLM -->> SVC : LlmTimeoutException\n(message porte llm.timeout-seconds, ex. 15 s)
+  SVC -> LOG : journaliser (echec)
+  SVC -->> AC : rethrow
+  AC -> API : 504 GATEWAY_TIMEOUT
+  API --> NF : « mis trop de temps a repondre »
+end
+
+group Cas 4 — brique non configurée (503)
+  LLM -> LLM : cleApi.isEmpty() → LlmConfigException\n(AUCUN appel réseau émis)
+  LLM -->> SVC : rethrow
+  SVC -> LOG : journaliser (echec)
+  SVC -->> AC : rethrow
+  AC -> API : 503 SERVICE_UNAVAILABLE
+  API --> NF : « n'est pas configure.\nSaisissez la depense a la main »
+end
+
+note over SVC
+  <b>Journaliser AVANT de rethrow</b> : chaque échec —
+  refus de validation OU panne fournisseur — produit
+  exactement une ligne ai_call_log, succès ou échec,
+  jamais zéro (taux de réussite honnête). Le message
+  d'erreur est tronqué à 500 caractères (LONGUEUR_MAX).
+end note
+
+note over NF
+  <b>Aucune écriture silencieuse</b> : l'extraction ne
+  fait que pré-remplir ; la note n'existe en base
+  qu'après le clic « Enregistrer » du formulaire, qui
+  repasse par la validation Zod puis Jakarta.
+end note
+
+@enduml

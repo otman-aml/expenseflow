@@ -1,0 +1,107 @@
+@startuml activity-expense
+' ============================================================
+' ExpenseFlow — Diagramme d'activité : vie complète d'une note
+' Sources vérifiées :
+'   NoteForm.jsx          (création, choix IA vs manuel, Zod)
+'   RequestActions.jsx    (boutons réels par statut+role,
+'                          confirm, RejectModal, return null
+'                          sur état terminal)
+'   ExpenseRequestService (create/submit/approve/reject/
+'                          reimburse/rejectFinance — 403 puis
+'                          409, audits entre affectations)
+'   BudgetValidationService (validateExpense — par ligne,
+'                          stricte, 1 requête, renvoie≠lève)
+'   NotificationService   (5 types, try/catch isolé)
+' ============================================================
+
+title ExpenseFlow — Activité : une note de frais\n(création → soumission → validation manager → remboursement)
+
+start
+
+partition "1. Création — POST /api/expense-requests (NoteForm.jsx)" {
+  :Employé rédige sa note\n(ligneSchema Zod : montant > 0, date AAAA-MM-JJ,\ndescription ≤ 500, ≥ 1 ligne) ;
+  if (Choix de la saisie ?) then (IA — optionnelle)
+    :« Pré-remplir avec l'IA » : extrait la 1re ligne\n(POST /api/ai/extract-expense, brique absente = 503\n→ saisie manuelle possible) ;
+    :Employé vérifie et corrige la ligne pré-remplie\n(texte de l'extraction conservé) ;
+  else (manuel)
+    :Saisie directe des lignes du formulaire ;
+  endif
+  :Zod valide avant envoi (aucune requête sinon),\npuis Jakarta Validation côté serveur ;
+  :create() : statut = DRAFT,\ntotal = somme des lignes (recalculé serveur),\ndateSoumission = null\n— AUCUN contrôle de plafond à la création ;
+}
+
+partition "2. Soumission — POST /{id}/submit (bouton « Soumettre »)" {
+  :Bouton proposé SI statut DRAFT ET propriétaire\n(RequestActions : statut + role, aucun droit dupliqué) ;
+  if (Appelant = propriétaire ?) then (oui)
+  else (non — tiers ou manager)
+    :403 AccessDeniedException — AUCUNE écriture,\naucun audit ;
+    note right
+      <b>Ordre immuable des contrôles</b> (ExpenseRequestService) :
+      1. propriété/rôle → 403 · 2. état → 409.
+      Aucune écriture avant ces contrôles : un refus ne
+      laisse ni trace d'audit ni notification.
+    end note
+    stop
+  endif
+  while (Plafonds violés ?\n(BudgetValidationService : comparaison PAR LIGNE,\nstricte (>) — 1 seule requête findByRoleWithCategorie,\ncatégorie sans plafond = ouvert)) is (oui)
+    :409 BudgetExceededException —\n« Plafond depasse : transport (EMPLOYEE)\n: 600.00 MAD > 500.00 MAD »\nNOTE INTACTE EN DRAFT ;
+    :Employé corrige la ligne puis\nrelance « Soumettre » ;
+  endwhile (non — conforme)
+  :dateSoumission = now ;
+  :DRAFT → SUBMITTED (audit)\npuis transition SYSTÈME\nSUBMITTED → PENDING_MANAGER (audit) —\nles 2 affectations avec le journal ENTRE les deux ;
+  :Notification à TOUS les managers\n(NOTE_SOUMISE, lien /notes/{id}) ;
+  note right
+    <b>Audit</b> : seuls les CHANGEMENTS D'ÉTAT sont
+    journalisés (STATUS_CHANGE) — la création en DRAFT
+    ne l'est pas. Même transaction que l'action.
+    <b>Notifications</b> : try/catch isolé par appel —
+    une panne de notification n'annule jamais la décision.
+  end note
+}
+
+partition "3. Niveau 1 — décision manager (RequestActions)" {
+  :Boutons proposés SI statut PENDING_MANAGER ET\nrôle MANAGER ou FINANCE_ADMIN :\n« Approuver » (confirm) / « Rejeter » (motif) ;
+  note right
+    <b>Refus serveur vs boutons front</b> (javadoc
+    RequestActions) : le composant ne fait que ne pas
+    proposer un bouton qui échouerait — c'est le 403/409
+    du serveur qui fait autorité. Sur état terminal,
+    aucun bouton n'est gris : il est ABSENT.
+    Un échec front (409/403) affiche le message serveur
+    via ErrorBanner puis recharge (onAction()).
+  end note
+  if (Décision du validateur ?) then (Approuver)
+    :approve() — exigerRole(MANAGER, FINANCE_ADMIN)\n(403 d'abord, puis assertTransition) ;
+    :PENDING_MANAGER → APPROVED_MANAGER\n(audit + entrée approvals APPROVED_MANAGER) ;
+    :Transition SYSTÈME :\nAPPROVED_MANAGER → PENDING_FINANCE (audit) ;
+    :Notification auteur « approuvée et transmise\nà la finance » (NOTE_APPROUVEE) ;
+  else (Rejeter — RejectModal, motif OBLIGATOIRE)
+    :reject(id, commentaire) — même rôles autorisés ;
+    :REJECTED_MANAGER (audit + approvals\nREJECTED_MANAGER + motif, commentaire=null refusé) ;
+    :Notification auteur (NOTE_REJETEE,\nmessage figé au moment du rejet) ;
+    stop
+  endif
+}
+
+partition "4. Niveau 2 — décision finance (RequestActions)" {
+  :Boutons proposés SI statut PENDING_FINANCE ET\nrôle FINANCE_ADMIN :\n« Rembourser » (confirm) / « Rejeter » (motif) ;
+  if (Décision de la finance ?) then (Rembourser)
+    :reimburse() — exigerRole(FINANCE_ADMIN) SEUL\n(un MANAGER seul est refusé ici) ;
+    :REIMBURSED (audit + approvals APPROVED_FINANCE)\n— TRANSITION TERMINALE, fin du circuit ;
+    :Notification « a été remboursée » (NOTE_REMBOURSEE) ;
+    stop
+  else (Rejeter — motif obligatoire)
+    :rejectFinance(id, commentaire) ;
+    :REJECTED_FINANCE (audit + approvals + motif)\n— TRANSITION TERMINALE ;
+    :Notification (NOTE_REJETEE_FINANCE) ;
+    stop
+  endif
+}
+
+stop
+
+' ---------- Notes de règles : voir note right ci-dessus ----------
+
+@enduml
+
+@enduml

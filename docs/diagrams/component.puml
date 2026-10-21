@@ -1,0 +1,119 @@
+@startuml component
+' ============================================================
+' ExpenseFlow — Diagramme de composants
+' Sources vérifiées :
+'   docker-compose.yml   (3 services, ports 4300/8090/5434,
+'                         réseau interne, healthchecks,
+'                         JWT_SECRET/GROQ_API_KEY requis)
+'   backend/Dockerfile   (multi-étapes maven→JRE 21, USER
+'                         non root, EXPOSE 8090, /actuator/health)
+'   frontend/Dockerfile  (nginx:1.27-alpine, dist/ local,
+'                         USER nginx, EXPOSE 8080)
+'   frontend/nginx.conf  (proxy /api/ → backend:8090,
+'                         try_files SPA, cache assets)
+'   backend/pom.xml      (starter webmvc/jpa/security/
+'                         validation/flyway/actuator,
+'                         jjwt 0.12.6, springdoc, postgresql)
+'   packages com.expenseflow : config, controller, dto,
+'     entity, exception, repository, security, service, workflow
+' ============================================================
+
+title ExpenseFlow — Architecture par composants\n(3 conteneurs Docker · 1 dépendance externe)
+
+skinparam componentStyle rectangle
+skinparam component {
+  BackgroundColor White
+  BorderColor Black
+  FontSize 12
+}
+
+' ---------- Niveau 1 : le navigateur (hôte de l'utilisateur) ----------
+node "Navigateur (hôte de l'utilisateur)" as NAV {
+  component "React 18 + Vite — SPA\n(dist/ : build local, eslint OK)\nlogin · notes · workflow · IA · admin" as SPA <<frontend>>
+}
+
+' ---------- Niveau 2 : conteneur frontend ----------
+node "Conteneur expenseflow-frontend\nnginx:1.27-alpine — USER nginx — EXPOSE 8080\nmapping « 4300:8080 »" as FE {
+  component "nginx (nginx.conf)\n1. location /api/ → proxy_pass\n   http://backend:8090/api/\n2. try_files → index.html (SPA)\n3. /assets/ immutable 1an\n   /index.html no-cache" as NGINX <<reverse-proxy>>
+}
+
+' ---------- Niveau 3 : conteneur backend ----------
+node "Conteneur expenseflow-backend\nJRE 21 (étape 2 du build multi-étapes)\nUSER expenseflow non root — EXPOSE 8090\n« 8090:8090 » — healthcheck /actuator/health" as BE {
+
+  component "security <<couche sécurité>>\nSecurityConfig (rôles, /actuator/health public)\nJwtService (jjwt 0.12.6) + filtres JWT" as SEC <<Spring>>
+
+  component "controller <<couche REST>>\n9 contrôleurs @RestController\n+ springdoc /swagger-ui\nDTO d'entrée/sortie, @Valid" as CTRL <<Spring>>
+
+  component "service <<couche métier>>\nExpenseRequestService · AdminUserService\nAdminStatsService · NotificationService\nAiExtractionService (timeout 10s)\nUserProfileService · …" as SVC <<Spring>>
+
+  component "workflow <<machine à états>>\nExpenseWorkflow : TRANSITIONS,\ncanTransition/assertTransition,\nTERMINAUX → WorkflowException (409)" as WF <<domain>>
+
+  component "repository <<couche persistance>>\nSpring Data JPA\nExpenseRequestRepository, UserRepository,\nAuditLogRepository, NotificationRepository…" as REPO <<Spring>>
+
+  component "entity + config + dto + exception\n9 entités @Entity (tables)\nFlyway db/migration V1→V6\n(exception → code HTTP métier)" as DATA <<Spring>>
+
+  CTRL --> SVC : appels métier\n(403 rôle avant 409 état)
+  SVC --> WF : canTransition/\nassertTransition
+  SVC --> REPO : entités JPA
+  REPO --> DATA : mapping\nEntityManager
+  SEC --> CTRL : SecurityFilterChain\nJWT valide ou 401
+}
+
+' ---------- Niveau 4 : base de données ----------
+node "Conteneur expenseflow-postgres\npostgres:16-alpine — santé pg_isready\n« 5434:5432 » — volume postgres_data" as DB {
+  database "PostgreSQL\nbase expenseflow" as PG
+}
+
+' ---------- Dépendance externe ----------
+cloud "Groq API (externe)\napi.groq.com — HTTPS 443\ndétection IA des reçus" as GROQ <<third-party>>
+
+' __P2__
+
+' ---------- Dépendances (protocoles et ports réels) ----------
+
+SPA --> NGINX : HTTP · http://localhost:4300\n(racine, /assets/ — une seule origine,\naucun préflight CORS)
+
+NGINX --> CTRL : HTTP interne Docker\nproxy_pass http://backend:8090/api/\n(reseau compose, pas de « localhost »)
+
+REPO --> PG : JDBC — jdbc:postgresql://postgres:5432/expenseflow\n(Spring Data JPA + Flyway au démarrage,\nhost atteignable en 5434 pour le debug)
+
+SVC --> GROQ : HTTPS sortant — api.groq.com\n(clé GROQ_API_KEY injectée par .env,\njamais exposée au navigateur)
+
+NAV -[hidden]right-> FE
+FE -[hidden]right-> BE
+BE -[hidden]right-> DB
+
+' ---------- Notes de règles (extraites des fichiers) ----------
+
+note right of FE
+  <b>Le proxy nginx supprime tout CORS</b> : le navigateur
+  ne voit qu'une seule origine (4300). Même schéma que le
+  proxy Vite en développement — aucune divergence.
+  Les routes inconnues tombent sur index.html (SPA),
+  sans quoi un rafraichissement sur /notes/new = 404.
+  proxy_read_timeout 30s aligné sur le front (10s).
+end note
+
+note bottom of BE
+  <b>Ordre de démarrage garanti</b> : depends_on
+  condition: service_healthy (pg_isready) — sinon le
+  backend redémarre en boucle avant PostgreSQL.
+  <b>Secrets sans valeur de repli</b> : ${JWT_SECRET:?} et
+  ${GROQ_API_KEY:?} font échouer `compose up` si absents.
+  <b>Tests ignorés dans le build image</b> (Testcontainers
+  exige un démon Docker) : `mvn clean test` reste local.
+end note
+
+note bottom of GROQ
+  <b>Appel serveur uniquement</b> : ni la clé ni l'appel
+  ne transittent par le navigateur. Échec de la brique →
+  503 côté API, le front bascule sur la saisie manuelle.
+end note
+
+legend right
+  Ports du projet : <b>4300</b> (front) · <b>8090</b> (API/Swagger) · <b>5434</b> (PG hôte)
+  = 5432 interne · conteneurs non-root (nginx, expenseflow)
+  Spring Boot 4 · Java 21 · React 18 · PostgreSQL 16 · Flyway V1→V6
+endlegend
+
+@enduml

@@ -1,0 +1,177 @@
+@startuml use-case-diagram
+' ============================================================
+' ExpenseFlow — Diagramme de cas d'utilisation
+' Sources vérifiées : les 9 contrôleurs REST
+'   (backend/.../controller/*.java)
+' Chaque cas d'utilisation cite l'endpoint RÉEL et son
+' contrôle d'accès (@PreAuthorize) tel qu'écrit dans le code.
+' ============================================================
+
+title ExpenseFlow — Cas d'utilisation\n(acteurs = rôles UserRole, endpoints = code réel)
+
+left to right direction
+skinparam actorStyle awesome
+skinparam usecaseFontSize 11
+skinparam rectangleBorderColor Black
+
+' ---------- Acteurs (rôles réels : entity/enums/UserRole.java) ----------
+
+actor "Employé\n(EMPLOYEE)" as EMP
+actor "Manager\n(MANAGER)" as MGR
+actor "Finance Admin\n(FINANCE_ADMIN)" as FIN
+actor "Admin\n(ADMIN)" as ADM
+actor "Groq API\n(externe)" as GROQ
+
+' Manager et Finance Admin partagent le périmètre employé :
+' tout rôle authentifié peut créer et soumettre ses propres notes
+MGR --|> EMP
+FIN --|> EMP
+
+' ---------- Frontière du système ----------
+
+rectangle "Système ExpenseFlow — API REST /api/**" {
+
+  ' --- Authentification (SecurityConfig : permitAll) ---
+  usecase "S'inscrire\nPOST /api/auth/register (public)" as UC_REGISTER
+  usecase "Se connecter\nPOST /api/auth/login (public)" as UC_LOGIN
+
+  ' --- Profil (isAuthenticated) ---
+  usecase "Consulter son profil\nGET /api/users/me" as UC_PROFIL
+  usecase "Modifier son profil\nPUT /api/users/me" as UC_PROFIL_EDIT
+  usecase "Changer son mot de passe\nPUT /api/users/me/password" as UC_MDP
+
+  ' --- Notifications (isAuthenticated, notifications propres) ---
+  usecase "Consulter ses notifications non lues\nGET /api/notifications" as UC_NOTIF
+  usecase "Marquer une notification lue\nPUT /api/notifications/{id}/lue" as UC_NOTIF_LUE
+  usecase "Tout marquer comme lu\nPUT /api/notifications/toutes-lues" as UC_NOTIF_TOUT
+
+  ' --- Notes de frais (isAuthenticated ; transitions contrôlées dans le service) ---
+  usecase "Créer une note de frais (DRAFT)\nPOST /api/expense-requests" as UC_CREATE
+  usecase "Consulter ses notes\nGET /api/expense-requests" as UC_LIST
+  usecase "Consulter le détail d'une note\nGET /api/expense-requests/{id}" as UC_DETAIL
+  usecase "Soumettre une note\nPOST /api/expense-requests/{id}/submit" as UC_SUBMIT
+  usecase "Vérifier les plafonds budgétaires\nBudgetValidationService → 409 si dépassé" as UC_PLAFOND
+
+  ' --- Aide à la saisie (isAuthenticated) ---
+  usecase "Consulter les catégories\nGET /api/categories" as UC_CAT
+  usecase "Consulter ses plafonds (son rôle)\nGET /api/budget-limits/me" as UC_LIMITS_ME
+  usecase "Extraire une dépense par IA\nPOST /api/ai/extract-expense" as UC_AI
+  usecase "Tester la brique IA (temporaire)\nPOST /api/ai/test" as UC_AI_TEST
+
+  ' --- Côté manager (rôle vérifié dans le service après chargement) ---
+  usecase "Consulter la file PENDING_MANAGER\nGET /api/expense-requests?statut=..." as UC_FILE_MGR
+  usecase "Approuver une note (niveau manager)\nPOST /{id}/approve" as UC_APPROVE
+  usecase "Rejeter une note (niveau manager)\nPOST /{id}/reject" as UC_REJECT_MGR
+
+  ' --- Côté finance ---
+  usecase "Consulter les files PENDING_MANAGER / PENDING_FINANCE\nGET /api/expense-requests?statut=..." as UC_FILE_FIN
+  usecase "Rembourser une note\nPOST /{id}/reimburse" as UC_REIMBURSE
+  usecase "Rejeter une note (niveau finance)\nPOST /{id}/reject-finance" as UC_REJECT_FIN
+  usecase "Gérer les catégories\nPOST / PUT / DELETE /api/categories" as UC_CAT_ADMIN
+  usecase "Gérer les plafonds budgétaires\nCRUD /api/budget-limits" as UC_LIMITS_ADMIN
+  usecase "Consulter les statistiques IA\nGET /api/ai/stats" as UC_AI_STATS
+
+  ' --- Côté administration (annotation sur la classe : hasRole ADMIN) ---
+  usecase "Créer un compte (mdp provisoire V6)\nPOST /api/admin/users" as UC_ADM_CREATE
+  usecase "Lister tous les comptes\nGET /api/admin/users" as UC_ADM_LIST
+  usecase "Lister les managers assignables\nGET /api/admin/users/managers" as UC_ADM_MGR
+  usecase "Modifier un compte (rôle, manager)\nPUT /api/admin/users/{id}" as UC_ADM_UPDATE
+  usecase "Supprimer un compte\nDELETE /api/admin/users/{id}" as UC_ADM_DELETE
+  usecase "Consulter les statistiques d'administration\nGET /api/admin/stats" as UC_ADM_STATS
+
+  ' --- Appel externe (AiExtractionService → LlmClient/GroqClient) ---
+  usecase "Appeler le modèle Groq\nchat completion (openai/gpt-oss-120b)" as UC_GROQ_CALL
+}
+
+' ---------- Liens acteurs → cas d'utilisation ----------
+
+EMP -- UC_REGISTER
+EMP -- UC_LOGIN
+EMP -- UC_PROFIL
+EMP -- UC_PROFIL_EDIT
+EMP -- UC_MDP
+EMP -- UC_NOTIF
+EMP -- UC_NOTIF_LUE
+EMP -- UC_NOTIF_TOUT
+EMP -- UC_CREATE
+EMP -- UC_LIST
+EMP -- UC_DETAIL
+EMP -- UC_SUBMIT
+EMP -- UC_CAT
+EMP -- UC_LIMITS_ME
+EMP -- UC_AI
+
+MGR -- UC_FILE_MGR
+MGR -- UC_APPROVE
+MGR -- UC_REJECT_MGR
+
+FIN -- UC_FILE_FIN
+FIN -- UC_REIMBURSE
+FIN -- UC_REJECT_FIN
+FIN -- UC_CAT_ADMIN
+FIN -- UC_LIMITS_ADMIN
+FIN -- UC_AI_STATS
+
+ADM -- UC_LOGIN
+ADM -- UC_PROFIL
+ADM -- UC_PROFIL_EDIT
+ADM -- UC_MDP
+ADM -- UC_NOTIF
+ADM -- UC_NOTIF_LUE
+ADM -- UC_NOTIF_TOUT
+ADM -- UC_ADM_CREATE
+ADM -- UC_ADM_LIST
+ADM -- UC_ADM_MGR
+ADM -- UC_ADM_UPDATE
+ADM -- UC_ADM_DELETE
+ADM -- UC_ADM_STATS
+
+GROQ -- UC_GROQ_CALL
+
+' ---------- Relations include (obligatoires dans le code) ----------
+
+UC_SUBMIT ..> UC_PLAFOND : <<include>>
+UC_AI     ..> UC_GROQ_CALL : <<include>>
+UC_AI_TEST ..> UC_GROQ_CALL : <<include>>
+
+' ---------- Notes (règles réelles du code) ----------
+
+note bottom of UC_MDP
+  <b>V6 — changement forcé :</b> un compte créé par
+  l'ADMIN naît avec <b>doit_changer_mdp = true</b> ;
+  le front bloque l'accès jusqu'au changement
+  (mêmes endpoints, aucun endpoint dédié).
+end note
+
+note bottom of UC_SUBMIT
+  <b>submit()</b> enchaîne deux transitions
+  (DRAFT → SUBMITTED → PENDING_MANAGER), chacune
+  journalisée dans <b>audit_log</b>. Propriétaire
+  seul : 403 pour un tiers, y compris le manager.
+  Plafond dépassé → <b>409</b>.
+end note
+
+note bottom of UC_APPROVE
+  Le rôle MANAGER n'est pas dans @PreAuthorize :
+  le service vérifie, <b>après chargement de la
+  note</b>, que l'appelant est le manager de
+  l'auteur (ou la finance) → 403/404 justifiés.
+  Manager d'un niveau, finance de l'autre.
+end note
+
+note bottom of UC_ADM_CREATE
+  <b>ADMIN = administration pure</b> (javadoc
+  UserRole) : gestion des comptes + lecture
+  intégrale ; ne valide aucune note. Auto-refus
+  : un admin ne peut pas se supprimer (403).
+end note
+
+note right of UC_AI
+  Pré-remplissage seulement : le modèle n'écrit
+  jamais en base. Une ligne est journalisée dans
+  <b>ai_call_log</b> à chaque appel, succès ou
+  échec (422 JSON invalide, 502/504 fournisseur).
+end note
+
+@enduml
+

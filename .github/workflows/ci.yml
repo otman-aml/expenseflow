@@ -1,0 +1,96 @@
+# ============================================================
+# Intégration continue — vérification, pas déploiement.
+#
+# Ce pipeline ne publie rien : il vérifie que le code compile,
+# que les 431 tests passent et que le front se construit sans
+# erreur. La mise en ligne reste une opération manuelle
+# (cf. DEPLOYMENT.md).
+#
+# Les deux tâches sont indépendantes et s'exécutent en
+# parallèle : un échec du front n'empêche pas de voir le
+# résultat du backend, et inversement.
+# ============================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Une nouvelle version du push annule l'exécution précédente
+# encore en cours : inutile de tester un commit déjà abandonné.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ------------------------------------------------------------
+  # Backend — compilation et suite de tests
+  # ------------------------------------------------------------
+  backend:
+    name: Backend (Java 21)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          # Cache Maven : évite de retélécharger les dépendances
+          # à chaque exécution. Le calcul de la clé repose sur le
+          # pom.xml, donc une modification de version invalide
+          # le cache automatiquement.
+          cache: 'maven'
+          cache-dependency-path: backend/pom.xml
+
+      # Les tests d'intégration lèvent un conteneur PostgreSQL via
+      # Testcontainers. Docker est disponible sur les runners
+      # GitHub : c'est ce qui distingue cette exécution d'un build
+      # d'image, où le démon est absent (cf. backend/Dockerfile).
+      - name: Compiler et tester
+        working-directory: ./backend
+        run: ./mvnw -B clean test
+
+  # ------------------------------------------------------------
+  # Frontend — lint et build de production
+  # ------------------------------------------------------------
+  frontend:
+    name: Frontend (Node 22)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      # Node 22 et non 20 : Vite 8 déclare « ^20.19.0 || >=22.12.0 ».
+      # Node 20 est donc acceptable seulement à partir de la
+      # 20.19 — une version 20.18 ferait échouer l'installation.
+      # Node 22 supprime cette ambiguïté.
+      - name: Installer Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci` et non `npm install` : installe exactement ce que
+      # le verrouillage fixe, et échoue si le verrouillage est
+      # incohérent avec package.json. C'est ce qui garantit qu'une
+      # CI verte correspond bien à un build reproductible.
+      - name: Installer les dépendances
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Lint (ESLint)
+        working-directory: ./frontend
+        run: npm run lint
+
+      - name: Build de production
+        working-directory: ./frontend
+        run: npm run build

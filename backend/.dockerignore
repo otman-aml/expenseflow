@@ -1,0 +1,12 @@
+# Fichiers exclus du contexte de build Docker.
+#
+# Sans cela, le demon recoit target/ a chaque build, et le premier COPY
+# recopierait les classes compilees de l'hote — qui-remplaceraient ensuite
+# celles compilees dans l'image, rendant le build non reproductible.
+target
+.git
+.gitignore
+Dockerfile
+*.log
+.env
+.env.*

@@ -1,0 +1,37 @@
+-- ============================================================
+-- Projet     : ExpenseFlow
+-- Fichier    : V5__add_admin_role.sql
+-- Date       : 2026-10-09
+-- Description: Ajout du rôle ADMIN au type enum user_role.
+--
+-- Choix      : -- flyway:executeInTransaction=false est OBLIGATOIRE.
+--              ALTER TYPE ... ADD VALUE ne peut pas être exécuté au
+--              sein d'une transaction dans PostgreSQL : Flyway échouerait
+--              avec « ALTER TYPE ... ADD VALUE cannot run inside a
+--              transaction block ». L'en-tête le fait exécuter hors
+--              transaction, en autonome.
+--
+-- Choix      : la nouvelle valeur n'est PAS utilisée dans cette même
+--              exécution. PostgreSQL interdit de consommer un valeur
+--              d'enum ajoutée avant commit (« unsafe use of new value »).
+--              Le rôle n'est donc référencé que par les migrations et
+--              scripts suivants, jamais ici.
+--
+-- Choix      : colonne deja presente. La table users porte manager_id
+--              depuis V1 (nullable, ON DELETE SET NULL) et l'entité
+--              Java User.manager depuis le début : aucune modification
+--              de schema n'accompagne ce rôle. ADMIN ne change rien aux
+--              contraintes — il lit et écrit les mêmes tables.
+--
+-- Rétrocompatibilité : additive uniquement. Les comptes existants
+--              conservent leur rôle ; aucun UPDATE n'est nécessaire.
+--              Hibernate lit l'enum via EnumType.STRING : la valeur
+--              « ADMIN » résolue côté Java correspond à celle stockée.
+-- ============================================================
+
+-- flyway:executeInTransaction=false
+ALTER TYPE user_role ADD VALUE 'ADMIN';
+
+-- ============================================================
+-- Fin de la migration V5
+-- ============================================================

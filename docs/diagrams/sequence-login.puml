@@ -1,0 +1,105 @@
+@startuml sequence-login
+' ============================================================
+' ExpenseFlow — Diagramme de séquence : connexion
+' Sources vérifiées (appels RÉELS, dans l'ordre) :
+'   frontend/src/pages/LoginPage.jsx   (zodResolver loginSchema,
+'                                       memoriserEmail, redirect V6)
+'   frontend/src/stores/authStore.js   (login(), ecrireSession()
+'                                       sessionStorage/localStorage)
+'   frontend/src/api/auth.js           (POST /api/auth/login)
+'   backend  AuthController.login      (@Valid LoginRequest)
+'   backend  AuthService.login         (AuthenticationManager,
+'                                       SecurityContext, buildAuthResponse)
+'   backend  security/JwtService       (HS256, expiration 3600000 ms)
+'   backend  GlobalExceptionHandler    (BadCredentials → 401)
+' ============================================================
+
+title ExpenseFlow — Connexion\n(Zod → JWT HS256 → stockage → redirect V6)
+
+autonumber
+actor Utilisateur as U
+participant "LoginPage.jsx\n(React Hook Form)" as LP
+participant "authStore.js\n(Zustand)" as STORE
+participant "api/auth.js\n(Axios, baseURL /api)" as API
+participant "AuthController\n@RestController" as AC
+participant "AuthService\n@Service" as AS
+participant "AuthenticationManager\n+ CustomUserDetails\n+ BCrypt (PasswordEncoder)" as AM
+database "PostgreSQL\ntable users" as DB
+participant "JwtService\n(security/, HS256)" as JS
+
+== 1. Saisie et validation côté client ==
+
+U -> LP : saisit e-mail + mot de passe,\ncoche « Se souvenir de moi », clique
+LP -> LP : zodResolver(loginSchema)\nemail : min 1 + format e-mail\nmotDePasse : min 1\n(invalide = AUCUNE requête)
+
+alt formulaire invalide
+  LP --> U : erreurs de champ sous les inputs\n(bouton jamais désactivé longtemps)
+else formulaire valide
+  LP -> LP : memoriserEmail(email, rememberMe)\nlocalStorage « expenseflow.remember-email »\n(e-mail SEUL, jamais le jeton)
+  LP -> STORE : login(email, motDePasse, rememberMe)
+  STORE -> STORE : set loading = true\n(bouton désactivé : 1 requête par clic)
+  STORE -> API : authApi.login(email, motDePasse)
+  API -> AC : POST /api/auth/login\nJSON body : email, motDePasse
+
+== 2. Côté serveur ==
+
+  AC -> AC : @Valid LoginRequest\n(@NotBlank + @Email → 400 si vide)
+  AC -> AS : login(LoginRequest)
+  AS -> AS : email.trim().toLowerCase()
+  AS -> AM : authenticate(\n  UsernamePasswordAuthenticationToken(email, mdp))
+  AM -> DB : findByEmail(email)
+  DB --> AM : User (haché BCrypt)
+  AM -> AM : PasswordEncoder.matches(mdp, hash)
+  alt identifiants invalides (e-mail inconnu OU mot de passe erroné)
+    AM -->> AS : BadCredentialsException
+    AS -->> AC : propagée (aucun try/catch dans le service)
+    AC --> API : 401 JSON via GlobalExceptionHandler\nmessage IDENTIQUE dans les 2 cas\n(pas d'énumération de comptes)
+    API --> LP : AxiosError 401\nintercepteur : AUCUN retry et\n/auth/login ignoré (pas de boucle)
+    STORE -> STORE : set loading = false
+    LP --> U : ErrorBanner via getErrorMessage(error)\nAUCUNE session ouverte
+  else identifiants valides
+    AM --> AS : Authentication\n(principal = CustomUserDetails)
+    AS -> AS : SecurityContextHolder\n  .setAuthentication(authentication)
+    AS -> JS : generateToken(userDetails)
+    JS -> JS : Jwts.builder().subject(email)\n  .claim(role, ROLE_xxx)\n  .issuedAt(now) .expiration(+3600000 ms)\n  .signWith(signingKey, HS256).compact()
+    JS --> AS : jeton JWT compact (durée de vie 1 h)
+    AS --> AC : AuthResponse : token, « Bearer »,\nexpiration, UserResponse (dont doitChangerMdp)
+    AC --> API : 200 OK
+    API --> STORE : data = { token, user }
+    STORE -> STORE : ecrireSession(token, user, rememberMe)
+    alt rememberMe = false (défaut)
+      STORE -> STORE : sessionStorage, cle « expenseflow »\nJSON token+user — détruit à la fermeture
+    else rememberMe = true
+      STORE -> STORE : localStorage, cle « expenseflow.local »\npersistance assumée (expiration côté serveur)
+    end
+    STORE --> LP : resolve({ token, user })\nset loading = false (succès comme échec)
+    alt user.doitChangerMdp = true (compte créé par l'ADMIN — V6)
+      LP -> U : navigate('/profile', replace)\nstate doitChangerMdp : changement\nIMPOSE avant toute autre page
+    else doitChangerMdp = false
+      LP -> U : navigate(from, replace)\nvers la page initialement demandée
+    end
+  end
+end
+
+note over JS
+  Clé HS256 validée au démarrage : <b>jwt.secret</b>
+  ≥ 32 caractères, sinon <b>IllegalStateException</b>.
+  Aucun décodage du jeton côté front : la première
+  requête en 401 déclenche le logout (intercepteur).
+end note
+
+note right of STORE
+  <b>Restauration synchrone</b> lireSession() au
+  chargement du module — AVANT le 1er rendu React
+  (raison du choix manuel vs middleware persist).
+  localStorage lu en premier, puis sessionStorage.
+end note
+
+note over LP
+  <b>Zod empêche la requête</b> : saisie invalide =
+  zéro appel réseau. Le schéma serveur reste
+  défensif (@NotBlank/@Email → 400) pour tout
+  client qui contournerait le formulaire.
+end note
+
+@enduml

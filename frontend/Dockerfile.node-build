@@ -1,0 +1,53 @@
+# ---------- Etape 1 : construction ----------
+FROM node:22.9-alpine AS build
+
+WORKDIR /app
+
+# Les dependances sont copiees avant le code : tant que package-lock.json ne
+# change pas, cette couche reste dans le cache Docker. Un changement de
+# composant ne retelecharge donc pas les 300 paquets.
+#
+# `npm ci` et non `npm install` : il installe exactement ce que le fichier de
+# verrouillage fixe, et echoue si le verrouillage est incoherent avec
+# package.json. C'est la garantie qu'une image buildable le soit partout.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+# ---------- Etape 2 : service ----------
+FROM nginx:1.27-alpine
+
+# La configuration remplace celle de l'image : sans cela, toute URL inconnue
+# (=/notes/new au rafraichissement d'une page) renvoie 404, et l'utilisateur
+# voit une page blanche apres avoir recharge.
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+COPY --from=build /app/dist /usr/share/nginx/html
+
+# Utilisateur non root : nginx n'a aucune raison de tourner en root, et un
+# conteneur compromis ne doit pas disposer de privileges systeme.
+#
+# Les repertoires ci-dessous sont ceux que nginx ecrit au demarrage. Si l'un
+# appartient a root, le conteneur echoue avec une erreur peu parlante
+# ("Permission denied") sur un fichier dont on ignore qu'il est genere.
+# `/var/cache/nginx` manque dans certaines versions de l'image : d'ou le
+# `|| true`, qui ne fait pas echouer le build si le repertoire est absent.
+RUN chown -R nginx:nginx /var/cache/nginx 2>/dev/null || true
+RUN touch /var/run/nginx.pid && chown nginx:nginx /var/run/nginx.pid
+USER nginx
+
+EXPOSE 8080
+
+# Sonde de disponibilite : / est un fichier statique servi par nginx, sans
+# passer par l'API. Elle repond donc des que le front est pret, independamment
+# de l'etat du backend.
+#
+# 127.0.0.1 et non "localhost" : BusyBox resout "localhost" en IPv6 (::1)
+# alors que nginx n'ecoute qu'en IPv4, et la connexion est refusee. Le service
+# repond pourtant parfaitement depuis l'exterieur — le symptome est trompeur,
+# et le conteneur apparaitrait unhealthy alors qu'il sert la page.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/ || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

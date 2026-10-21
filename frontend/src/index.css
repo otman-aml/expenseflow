@@ -1,0 +1,101 @@
+/* ExpenseFlow — charte graphique
+ *
+ * Tailwind CSS v4 : les directives @tailwind base/components/utilities de la
+ * v3 sont remplacees par un unique @import "tailwindcss". Le moteur (Lightning
+ * CSS) detecte seul les fichiers a scanner depuis la racine du projet, ce qui
+ * rend tailwind.config.js inutile — et c'est pourquoi il n'existe pas ici.
+ *
+ * @theme remplace l'ancien bloc theme.extend. Toute couleur declaree ici
+ * devient une classe Tailwind (bg-brand-600, text-succes-600...). C'est le
+ * seul endroit a modifier pour ajuster la palette : aucun JSX ne porte de
+ * valeur hexadecimale.
+ */
+@import "tailwindcss";
+
+@theme {
+  /* ---- Couleurs de marque ------------------------------------
+   * Bleu soutenu, volontairement peu saturé : il doit tenir sur
+   * un bandeau de navigation de grande surface sans "#26398d".
+   * L'échelle va du très clair (fonds de sélection) au foncé
+   * (passages survolés), comme toute palette Tailwind.
+   */
+  --color-brand-50: #eef6ff;
+  --color-brand-100: #d9eaff;
+  --color-brand-200: #bcdcff;
+  --color-brand-300: #8ec5ff;
+  --color-brand-400: #59a3ff;
+  --color-brand-500: #2f6fed;
+  --color-brand-600: #1d5bd6;
+  --color-brand-700: #1a49ae;
+  --color-brand-800: #1a3f8a;
+  --color-brand-900: #1a3770;
+
+  /* ---- Gris de l'interface -----------------------------------
+   * Reprend l'échelle slate de Tailwind, déjà présente par défaut
+   * : la déclarer ici n'apporte aucune classe nouvelle, mais permet
+   * de lire la palette complète dans un seul fichier.
+   */
+
+  /* ---- Couleurs d'état ---------------------------------------
+   * Trois teintes seulement : succès, attente, erreur. Elles
+   * servent aux badges de statut et aux icônes de carte, jamais
+   * en aplat — un aplat rouge ou vert paraîtrait plus fort que
+   * l'information qu'il porte.
+   */
+  --color-succes-50: #f0fdf4;
+  --color-succes-600: #16a34a;
+  --color-attente-50: #fffbeb;
+  --color-attente-600: #d97706;
+  --color-erreur-50: #fef2f2;
+  --color-erreur-600: #dc2626;
+}
+
+/* ============================================================
+ * Base
+ *
+ * Ces règles ne sont pas des utilitaires : elles n'ont pas leur place
+ * dans un @apply du composant, car elles s'appliquent à toutes les
+ * pages et décrivent le document, pas un écran particulier.
+ * ============================================================ */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: var(--color-slate-800);
+  background-color: var(--color-slate-50);
+}
+
+/* Anneau de focus visible au clavier uniquement.
+ *
+ * Sans cela, un lien survolé affiche déjà un fond : la navigation au
+ * clavier n'aurait aucun retour visuel, et l'utilisateur ne saurait pas
+ * où il se trouve. `:focus-visible` ne s'allume que pour une
+ * navigation au clavier — un clic de souris ne laisse pas d'anneau
+ * résiduel sur chaque élément cliqué.
+ */
+:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+}
+
+/* Curseur de main sur tout bouton actif.
+ *
+ * Ni le reset de Tailwind ni ses utilitaires n'ajoutent `cursor: pointer`
+ * aux <button> : sans cette règle, le pointeur reste une flèche sur des
+ * éléments pourtant cliquables, et le survol se lit comme « ça ne
+ * réagit pas ». Un seul sélecteur couvre donc tous les boutons de
+ * l'application — action, formulaire, pagination — au lieu de répéter
+ * `cursor-pointer` dans chaque JSX. `:disabled` est exclu : un bouton
+ * inactif doit afficher `not-allowed`, pas la main.
+ */
+button:not(:disabled),
+[role='button']:not(:disabled) {
+  cursor: pointer;
+}

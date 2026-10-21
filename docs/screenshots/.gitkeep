@@ -1,0 +1,8 @@
+# Dossier de captures d'écran.
+
+# Le README annonce des captures ; ce .gitkeep maintient le dossier dans
+# Git. Git ne versionne pas les dossiers vides : sans ce fichier, `docs/`
+# disparaîtrait du dépôt et les images ajoutées plus tard seraient orphelines.
+
+Les fichiers PNG/JPG Deposés ici **sont** versionnés : ce sont les captures
+de la démonstration, et elles font partie du portfolio.

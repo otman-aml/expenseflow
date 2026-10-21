@@ -1,0 +1,216 @@
+@startuml class-diagram
+' ============================================================
+' ExpenseFlow — Diagramme de classes
+' Source vérifiée : backend/src/main/java/com/expenseflow/
+'   entity/*.java (9 entités JPA)
+'   entity/enums/*.java (4 enums)
+' Aucun champ inventé : chaque attribut existe dans le code.
+' ============================================================
+
+title ExpenseFlow — Diagramme de classes\n(entités JPA et enums, extraits du code source)
+
+skinparam classAttributeIconSize 0
+skinparam classFontSize 12
+hide empty members
+
+' ---------- Enums (entity/enums/*.java) ----------
+
+enum UserRole {
+  EMPLOYEE
+  MANAGER
+  FINANCE_ADMIN
+  ADMIN
+}
+
+enum ExpenseStatus {
+  DRAFT
+  SUBMITTED
+  PENDING_MANAGER
+  APPROVED_MANAGER
+  REJECTED_MANAGER
+  PENDING_FINANCE
+  REIMBURSED
+  REJECTED_FINANCE
+}
+
+enum ApprovalStatus {
+  APPROVED_MANAGER
+  REJECTED_MANAGER
+  APPROVED_FINANCE
+  REJECTED_FINANCE
+}
+
+enum NotificationType {
+  NOTE_SOUMISE
+  NOTE_APPROUVEE
+  NOTE_REJETEE
+  NOTE_REJETEE_FINANCE
+  NOTE_REMBOURSEE
+}
+
+' ---------- Entités JPA (table SQL entre crochets) ----------
+
+class User <<users>> {
+  - id : Long
+  - nom : String {not null}
+  - email : String {unique}
+  - motDePasse : String
+  - role : UserRole
+  - doitChangerMdp : boolean
+  - createdAt : Instant
+  - updatedAt : Instant
+}
+
+class ExpenseRequest <<expense_requests>> {
+  - id : Long
+  - statut : ExpenseStatus
+  - dateSoumission : Instant
+  - totalMontant : BigDecimal(10,2)
+  - createdAt : Instant
+  - updatedAt : Instant
+}
+
+class ExpenseLine <<expense_lines>> {
+  - id : Long
+  - montant : BigDecimal(10,2)
+  - dateDepense : LocalDate
+  - description : String
+  - justificatifUrl : String
+  - createdAt : Instant
+  - updatedAt : Instant
+}
+
+class Category <<categories>> {
+  - id : Long
+  - nom : String {unique}
+  - createdAt : Instant
+  - updatedAt : Instant
+}
+
+class Approval <<approvals>> {
+  - id : Long
+  - statut : ApprovalStatus
+  - commentaire : String
+  - dateAction : Instant
+  - createdAt : Instant
+  - updatedAt : Instant
+}
+
+class AuditLog <<audit_log>> {
+  - id : Long
+  - entiteConcernee : String(100)
+  - entiteId : Long
+  - action : String(100)
+  - dateAction : Instant
+  - details : String
+  - createdAt : Instant
+  - updatedAt : Instant
+}
+
+class BudgetLimit <<budget_limits>> {
+  - id : Long
+  - role : UserRole
+  - plafond : BigDecimal(10,2)
+  - createdAt : Instant
+  - updatedAt : Instant
+}
+
+class AiCallLog <<ai_call_log>> {
+  - id : Long
+  - dateAppel : Instant
+  - dureeMs : Long
+  - succes : Boolean
+  - typeErreur : String(50)
+  - messageErreur : TEXT
+  - tokensPrompt : Integer
+  - tokensCompletion : Integer
+  - tokensTotal : Integer
+  - modele : String(50)
+  - createdAt : Instant
+}
+
+class Notification <<notifications>> {
+  - id : Long
+  - type : NotificationType
+  - message : String
+  - lien : String(200)
+  - lue : boolean
+  - createdAt : Instant
+}
+
+' ---------- Enums utilisés par les entités ----------
+
+User        *-- UserRole
+ExpenseRequest *-- ExpenseStatus
+Approval    *-- ApprovalStatus
+BudgetLimit *-- UserRole
+Notification *-- NotificationType
+
+' ---------- Relations (cardinalités = @JoinColumn du code) ----------
+
+' Auto-référence : un User a 0..1 manager ; un manager encadre N employés
+User "1" <-- "*" User : manager_id (LAZY, auto-réf.)
+
+' Un employé possède N notes ; chaque note a exactement 1 auteur (NN)
+User "1" <-- "*" ExpenseRequest : employee_id {not null}
+
+' Composition forte : cascade ALL + orphanRemoval = true
+ExpenseRequest "1" <-- "*" ExpenseLine : request_id {not null}
+
+' Une catégorie regroupe N lignes et N plafonds
+Category "1" <-- "*" ExpenseLine : categorie_id {not null}
+Category "1" <-- "*" BudgetLimit : (categorie_id, role) {unique}
+
+' Une note reçoit N décisions (1 par niveau + rejets)
+ExpenseRequest "1" <-- "*" Approval : request_id {not null}
+User "1" <-- "*" Approval : validateur_id {not null}
+
+' Journal d'audit : une ligne par action, auteur obligatoire
+User "1" <-- "*" AuditLog : utilisateur_id {not null}
+
+' Journal d'appels IA : auteur nullable (ON DELETE SET NULL)
+User "0..1" <-- "*" AiCallLog : utilisateur_id (nullable)
+
+' Notification : destinataire obligatoire, suppression en cascade (BDD)
+User "1" <-- "*" Notification : utilisateur_id {not null, DB CASCADE}
+
+' ---------- Notes documentées (extraits des javadocs) ----------
+
+note bottom of User
+  Auto-référence <b>manager_id</b> (V1) : chaîne
+  d'approbation mono-niveau. <b>doit_changer_mdp</b>
+  ajouté par la migration V6 (mot de passe
+  provisoire à changer à la 1re connexion).
+  Rôle ADMIN ajouté par V5 (gestion des comptes).
+end note
+
+note bottom of ExpenseRequest
+  Workflow à 8 états (<b>ExpenseStatus</b>) porté par
+  ExpenseWorkflow. <b>totalMontant</b> recalculé côté
+  service, jamais accepté du client.
+end note
+
+note bottom of Approval
+  <b>dateAction</b> pilotée par la BDD
+  (DEFAULT NOW(), insertable=false).
+end note
+
+note bottom of AuditLog
+  <b>AuditLog</b> = décisions métier (qui, quoi, quand).
+  <b>entiteId</b> ajouté par V2 (nullable : certaines
+  entités n'ont pas d'ID numérique).
+end note
+
+note bottom of AiCallLog
+  Journal <b>technique</b> (mesure), contrairement à
+  AuditLog. Une ligne par appel, <b>y compris échec</b>.
+  Tokens et modèle facturés par appel (V3).
+end note
+
+note bottom of Notification
+  Message figé à la création. 5 types
+  (<b>NotificationType</b>, V4). Supprimée avec le
+  compte (ON DELETE CASCADE en BDD).
+end note
+
+@enduml

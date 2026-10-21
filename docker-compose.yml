@@ -1,0 +1,93 @@
+# ============================================================
+# ExpenseFlow - pile complete en local.
+#
+#   cp .env.example .env   (OBLIGATOIRE : les secrets n'ont pas de valeur
+#                          de repli ici, ce fichier etant commite)
+#   docker compose up -d --build
+#
+#   Front    http://localhost:4300
+#   API      http://localhost:8090
+#   Swagger  http://localhost:8090/swagger-ui/index.html
+#
+# Les ports sont propres au projet (5434, 8090, 4300) afin de pouvoir
+# tourner a cote d'autres applications sur la meme machine.
+# ============================================================
+
+services:
+
+  # ---------- Base de donnees ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: expenseflow-postgres
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-expenseflow}
+      POSTGRES_USER: ${POSTGRES_USER:-expenseflow}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-expenseflow}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U expenseflow -d expenseflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------- API ----------
+  backend:
+    build:
+      context: ./backend
+    container_name: expenseflow-backend
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    # `condition: service_healthy` et non un simple `depends_on` : sans
+    # l'attente active, le backend demarre avant que PostgreSQL n'accepte les
+    # connexions, echoue, et le `restart: unless-stopped` le relance en
+    # boucle jusqu'a ce que la base soit prete. Le conteneur semble alors
+    # demarrer puis s'arreter sans raison apparente.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Pas de SPRING_PROFILES_ACTIVE ici : le compose fait office
+      # d'environnement de developpement, et le profil "local" de
+      # application.properties s'active tout seul. Il chargerait
+      # application-local.properties, qui n'est PAS copie dans l'image
+      # (voir .dockerignore) : le demarrage echouerait sur un secret
+      # JWT absent.
+      SPRING_PROFILES_ACTIVE: default
+      # Nom d'hote "postgres" : le service est resolu par le reseau interne
+      # de Docker, pas par "localhost", qui designe le conteneur lui-meme.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/expenseflow
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-expenseflow}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-expenseflow}
+      # Secrets : aucune valeur de repli. Un secret en dur dans ce fichier
+      # voyagerait dans le depot, et ce fichier est commite.
+      #
+      # La forme `${VAR:?message}` (avec deux-points et point d'exclamation)
+      # fait ECHOUER `docker compose up` des que la variable est absente ou
+      # vide. C'est volontairement bruyant : un message nommant la variable
+      # fautive vaut mieux qu'un demarrage a moitie configure, dont on
+      # decouvrira le defaut beaucoup plus tard, a la premiere connexion.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET manquant - creez .env a partir de .env.example}
+      GROQ_API_KEY: ${GROQ_API_KEY:?GROQ_API_KEY manquant - creez .env a partir de .env.example}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:4300}
+
+  # ---------- Front ----------
+  frontend:
+    build:
+      context: ./frontend
+    container_name: expenseflow-frontend
+    restart: unless-stopped
+    ports:
+      # nginx ecoute sur 8080 dans le conteneur (contrainte non-root) ;
+      # l'exterieur expose le port 4300 du projet.
+      - "4300:8080"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

@@ -1,0 +1,175 @@
+@startuml sequence-workflow
+' ============================================================
+' ExpenseFlow — Diagramme de séquence : workflow de validation
+' Sources vérifiées (appels RÉELS, dans l'ordre exact) :
+'   ExpenseRequestService.java  (submit/approve/reject/
+'                                reimburse/rejectFinance,
+'                                exigerRole, enregistrerDecision)
+'   workflow/ExpenseWorkflow.java (EnumMap TRANSITIONS, TERMINAUX)
+'   BudgetValidationService.java  (validateExpense, comparaison
+'                                  stricte, 1 requête par rôle)
+'   AuditLogService.java          (logChangementStatut, MÊME
+'                                  transaction que l'action)
+'   NotificationService.java      (try/catch isolé : un échec
+'                                  n'annule jamais la transition)
+'   ExpenseRequestController.java (5 transitions, isAuthenticated)
+' ============================================================
+
+title ExpenseFlow — Workflow\n(submit → approve → reimburse · plafonds · audit · notifications)
+
+autonumber
+actor "Employé\n(auteur)" as EMP
+actor "Manager" as MGR
+actor "Finance Admin" as FIN
+participant "ExpenseRequestController" as CTRL
+participant "ExpenseRequestService\n@Transactional" as SVC
+participant "ExpenseWorkflow\n(logique pure, statique)" as WF
+participant "BudgetValidationService" as BUD
+participant "AuditLogService" as AUD
+participant "NotificationService" as NOTIF
+participant "ExpenseRequestRepository\n+ ApprovalRepository" as REPO
+database PostgreSQL as DB
+
+note over SVC
+  <b>Ordre de contrôle immuable</b> (commentaire du service) :
+  1. rôle / propriété → <b>403</b> AccessDeniedException
+  2. état incompatible → <b>409</b> WorkflowException
+  Inverser renverrait 409 à un employé qui n'a pas le droit.
+  Le statut n'est JAMAIS affecté sans passer par
+  <b>ExpenseWorkflow.assertTransition</b> (transitions système exceptées).
+end note
+
+== A. Soumission — POST /api/expense-requests/{id}/submit ==
+
+EMP -> CTRL : submit(id)
+CTRL -> SVC : submit(id, currentUser)
+SVC -> REPO : findByIdWithLignes(id)
+REPO --> SVC : ExpenseRequest (404 si absente)
+SVC -> SVC : estProprietaire ?\nnon → AccessDeniedException (403)\n(un tiers ne soumet pas la note d'autrui)
+SVC -> WF : assertTransition(\n  DRAFT → SUBMITTED, EMPLOYEE, isOwner=true)
+WF --> SVC : autorisé (unique sortie de DRAFT)
+SVC -> BUD : validateExpense(request, employee)
+BUD -> BUD : findByRoleWithCategorie(role) — 1 requête\npuis comparaison PAR LIGNE, stricte (>)\ncatégorie sans plafond = ouvert
+
+alt violations détectées (plafond dépassé)
+  BUD --> SVC : List<BudgetViolation> non vide
+  SVC -->> CTRL : BudgetExceededException\n→ 409 (note INTACTE en DRAFT)
+  CTRL -->> EMP : 409 « Plafond depasse : ...\ntransport (EMPLOYEE) : 600 > 500 »
+else conforme
+  BUD --> SVC : liste vide
+  SVC -> SVC : dateSoumission = Instant.now()
+  SVC -> SVC : statut = SUBMITTED (1re transition)
+  SVC -> AUD : logChangementStatut(\n  DRAFT → SUBMITTED)
+  AUD -> DB : save audit_log\n(STATUS_CHANGE, date_action = DEFAULT NOW())
+  SVC -> SVC : statut = PENDING_MANAGER\n(2e transition — SYSTÈME,\nsans assertTransition : aucun API ne l'y mène)
+  SVC -> AUD : logChangementStatut(\n  SUBMITTED → PENDING_MANAGER)
+  AUD -> DB : save audit_log
+  SVC -> REPO : save(request) — commit de la note
+  SVC -> NOTIF : notifierSoumission(saved)
+  NOTIF -> NOTIF : userRepository.findByRole(MANAGER)\n→ TOUS les managers (pas d'équipe attitrée)
+  NOTIF -> DB : save notifications\n(type NOTE_SOUMISE, lien /notes/{id})
+  note over NOTIF : try/catch isolé : un échec de notification<br/>log.warn() et poursuit — la transition tient
+  SVC --> CTRL : TransitionResponse(id, PENDING_MANAGER, updatedAt)
+  CTRL --> EMP : 200 OK
+end
+
+== B. Approbation manager — POST /{id}/approve ==
+
+MGR -> CTRL : approve(id)
+CTRL -> SVC : approve(id, currentUser)
+SVC -> SVC : exigerRole(MANAGER | FINANCE_ADMIN)\n→ 403 si EMPLOYEE ou ADMIN\n(403 d'abord : le droit avant l'état)
+SVC -> REPO : findByIdWithLignes(id)
+SVC -> WF : assertTransition(\n  PENDING_MANAGER → APPROVED_MANAGER, role, isOwner)
+WF --> SVC : autorisé (MANAGER ou FINANCE_ADMIN)
+SVC -> SVC : statut = APPROVED_MANAGER
+SVC -> AUD : logChangementStatut(\n  PENDING_MANAGER → APPROVED_MANAGER)
+AUD -> DB : save audit_log
+SVC -> REPO : enregistrerDecision → save approvals\n(ApprovalStatus.APPROVED_MANAGER,\ncommentaire = null, dateAction = DEFAULT NOW())
+SVC -> SVC : statut = PENDING_FINANCE\n(transition SYSTÈME automatique,\nconfie la note à la finance)
+SVC -> AUD : logChangementStatut(\n  APPROVED_MANAGER → PENDING_FINANCE)
+AUD -> DB : save audit_log
+SVC -> REPO : save(request)
+SVC -> NOTIF : notifierApprouvee(saved)
+NOTIF -> DB : save notifications\n(NOTE_APPROUVEE → l'AUTEUR de la note)
+SVC --> CTRL : TransitionResponse(id, PENDING_FINANCE, updatedAt)
+CTRL --> MGR : 200 OK
+
+== C. Rejet manager — POST /{id}/reject (motif obligatoire) ==
+
+MGR -> CTRL : reject(id, commentaire)
+CTRL -> SVC : reject(id, currentUser, commentaire)
+SVC -> SVC : exigerRole(MANAGER | FINANCE_ADMIN) → 403
+SVC -> REPO : findByIdWithLignes(id)
+SVC -> WF : assertTransition(\n  PENDING_MANAGER → REJECTED_MANAGER, ...)
+SVC -> SVC : statut = REJECTED_MANAGER\n(<b>terminal</b> — aucune sortie dans TRANSITIONS)
+SVC -> AUD : logChangementStatut(\n  PENDING_MANAGER → REJECTED_MANAGER)
+SVC -> REPO : enregistrerDecision → save approvals\n(REJECTED_MANAGER, commentaire)
+SVC -> REPO : save(request)
+SVC -> NOTIF : notifierRejetee(saved, commentaire)
+NOTIF -> DB : save notifications (NOTE_REJETEE → auteur)
+SVC --> CTRL : TransitionResponse(id, REJECTED_MANAGER, updatedAt)
+CTRL --> MGR : 200 OK
+
+== D. Côté finance — POST /{id}/reimburse et /{id}/reject-finance ==
+
+FIN -> CTRL : reimburse(id)
+CTRL -> SVC : reimburse(id, currentUser)
+SVC -> SVC : exigerRole(FINANCE_ADMIN) —<b>seul</b> rôle accepté ici\n(à la différence de approve/reject : MANAGER refusé)
+SVC -> REPO : findByIdWithLignes(id)
+SVC -> WF : assertTransition(\n  PENDING_FINANCE → REIMBURSED, FINANCE_ADMIN, ...)
+SVC -> SVC : statut = REIMBURSED\n(<b>terminal</b> — fin du circuit)
+SVC -> AUD : logChangementStatut(\n  PENDING_FINANCE → REIMBURSED)
+SVC -> REPO : enregistrerDecision → save approvals\n(ApprovalStatus.APPROVED_FINANCE, commentaire null)
+SVC -> REPO : save(request)
+SVC -> NOTIF : notifierRemboursee(saved)
+NOTIF -> DB : save notifications (NOTE_REMBOURSEE → auteur)
+SVC --> FIN : 200 TransitionResponse(REIMBURSED)
+
+FIN -> CTRL : rejectFinance(id, commentaire)
+CTRL -> SVC : rejectFinance(id, currentUser, commentaire)
+SVC -> SVC : exigerRole(FINANCE_ADMIN)
+SVC -> WF : assertTransition(\n  PENDING_FINANCE → REJECTED_FINANCE, ...)
+SVC -> SVC : statut = REJECTED_FINANCE (<b>terminal</b>)
+SVC -> AUD : logChangementStatut(\n  PENDING_FINANCE → REJECTED_FINANCE)
+SVC -> REPO : enregistrerDecision\n(REJECTED_FINANCE, commentaire) + save(request)
+SVC -> NOTIF : notifierRejetFinance(saved, commentaire)
+NOTIF -> DB : save notifications (NOTE_REJETEE_FINANCE → auteur)
+SVC --> FIN : 200 TransitionResponse(REJECTED_FINANCE)
+
+' ---------- Notes de règles (extraites du code) ----------
+
+note over WF
+  <b>Transitions système absentes de TRANSITIONS</b> :
+  SUBMITTED → PENDING_MANAGER et APPROVED_MANAGER →
+  PENDING_FINANCE ne sont dans aucune EnumSet — seul le
+  service les franchit, dans la même transaction.
+  <b>TERMINAUX</b> = {REIMBURSED, REJECTED_MANAGER,
+  REJECTED_FINANCE} : clé absente de la map = mort.
+end note
+
+note over AUD
+  <b>Même transaction que l'action</b> : si la transition
+  échoue, sa trace disparaît avec elle — jamais de trace
+  d'un changement qui n'a pas eu lieu. Le journal est
+  écrit ENTRE les deux affectations de submit(), jamais
+  après (sinon « PENDING_MANAGER -> PENDING_MANAGER »).
+  date_action : DEFAULT NOW() côté PostgreSQL.
+end note
+
+note over NOTIF
+  <b>5 types</b> (NotificationType) : NOTE_SOUMISE (tous
+  les managers), NOTE_APPROUVEE, NOTE_REJETEE,
+  NOTE_REJETEE_FINANCE, NOTE_REMBOURSEE (l'auteur).
+  try/catch par appel : la notification est un confort,
+  la décision métier l'essentiel.
+end note
+
+note over BUD
+  Comparaison <b>stricte</b> (>) : atteindre le plafond
+  est conforme. 1 seule requête
+  findByRoleWithCategorie — pas de N+1.
+  La méthode ne lève pas : elle RENVOIE les violations ;
+  c'est le service qui choisit le 409.
+end note
+
+@enduml

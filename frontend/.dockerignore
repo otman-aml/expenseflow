@@ -1,0 +1,18 @@
+# Fichiers exclus du contexte de build Docker.
+#
+# Sans cela, le demon Docker envoie node_modules au daemon a chaque build :
+# des centaines de mega-octets, et un `COPY src` qui recopie un node_modules
+# de l'hote dans l'image, avec les versions installees sur ma machine plutot
+# que celles du verrouillage.
+#
+# `dist` n'est PAS exclu : le Dockerfile actuel sert directement le dist/
+# genere en local (pas de build npm dans l'image). L'ancien Dockerfile
+# multi-etapes est conserve dans Dockerfile.node-build.
+node_modules
+.vite
+.git
+.gitignore
+Dockerfile
+*.log
+.env
+.env.*

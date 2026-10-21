@@ -1,0 +1,47 @@
+# ============================================================
+# ExpenseFlow
+# Ce fichier est COMMITÉ : il documente ce qui ne doit pas l'être.
+# ============================================================
+
+# Backend
+backend/target/
+backend/*.iml
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Environnements
+# .env.example est volontairement ABSENT de cette liste : il documente les
+# variables sans porter de valeur, et doit donc être commité.
+.env
+.env.local
+.env.*.local
+
+# Configuration locale non commitée
+# Contient le secret JWT de développement, en clair. C'est la ligne la plus
+# sensible du fichier : la déplacer ou l'oublier exposerait la clé.
+backend/src/main/resources/application-local.properties
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+postgres_data/
+
+# Variantes de profondeur : couvre un module Maven ou un front imbriqué sous
+# un sous-dossier, que les motifs ci-dessus ne qualifieraient pas.
+**/target/
+**/node_modules/
